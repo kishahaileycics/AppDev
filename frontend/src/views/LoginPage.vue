@@ -38,33 +38,43 @@
 <script>
 export default {
   data() {
-    return { email: "", password: "" };
+    return {
+      email: "",
+      password: ""
+    };
   },
+
   methods: {
-    async handleLogin() {
-      try {
-        const response = await fetch("http://localhost:3000/api/auth/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: this.email, password: this.password })
-        });
+  async handleLogin() {
+    try {
+      const response = await fetch("http://localhost:3000/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: this.email, password: this.password })
+      });
 
-        const data = await response.json();
+      const data = await response.json();
 
-        if (response.ok) {
-          alert("✅ Login Successful!");
-          
-        } else {
-          alert("❌ " + data.message);
+      if (response.ok) {
+        // store user object for other pages
+        if (data.user) {
+          localStorage.setItem('user', JSON.stringify(data.user));
         }
-      } catch (error) {
-        console.error(error);
-        alert("❌ Server error. Is the backend running?");
+
+        alert("✅ Login Successful!");
+        this.$router.push('/dashboard');
+      } else {
+        alert("❌ " + data.message);
       }
+    } catch (error) {
+      console.error(error);
+      alert("❌ Server error. Is the backend running?");
     }
   }
+}
 };
 </script>
+
 
 <style scoped>
 .login-container { display: flex; width: 100vw; height: 100vh; font-family: "Poppins", sans-serif; }
