@@ -6,51 +6,76 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
-const db = require('./config/db'); // mysql2 pool
+const db = require('./config/db'); // mysql2 pool (callback-style)
 const app = express();
 
 // --- Middlewares ---
-app.use(cors()); // dev: allow all origins. In production restrict this.
-app.use(express.json()); // parse JSON bodies
-app.use(express.urlencoded({ extended: true })); // parse form bodies if needed
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // --- Health check ---
 app.get('/', (req, res) => res.send('Backend running'));
 
-// --- Auth routes (kept as you asked) ---
+/*
+  AUTH endpoints using `clients` table:
+
+  - POST /api/auth/login
+      body: { email, password }
+
+  - POST /api/auth/signup
+      body: { firstName, lastName, phone, email, password }
+*/
+
 app.post('/api/auth/login', (req, res) => {
   const { email, password } = req.body || {};
-  if (!email || !password) return res.status(400).json({ message: 'Missing credentials' });
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Missing credentials' });
+  }
 
-  db.query(
-    'SELECT id, firstName, lastName, email, password, role FROM users WHERE email = ?',
-    [email],
-    (err, results) => {
-      if (err) {
-        console.error('DB error (login):', err);
-        return res.status(500).json({ message: 'Database error' });
-      }
-      if (!results || results.length === 0)
-        return res.status(401).json({ message: 'Invalid email or password' });
+  const sql = `
+    SELECT
+      client_id AS id,
+      first_name,
+      last_name,
+      phone,
+      email,
+      password,
+      role
+    FROM clients
+    WHERE email = ?
+    LIMIT 1
+  `;
 
-      const user = results[0];
-      // NOTE: plain-text comparison here to preserve your existing behaviour.
-      // In production, use bcrypt and tokens.
-      if (user.password !== password)
-        return res.status(401).json({ message: 'Invalid email or password' });
-
-      return res.json({
-        message: 'Login successful',
-        user: {
-          id: user.id,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          email: user.email,
-          role: user.role
-        }
-      });
+  db.query(sql, [email], (err, results) => {
+    if (err) {
+      console.error('DB error (login):', err);
+      return res.status(500).json({ message: 'Database error' });
     }
-  );
+    if (!results || results.length === 0) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    const client = results[0];
+
+    // Plain-text comparison to match your current setup.
+    // (Later, we can swap this to bcrypt.)
+    if (client.password !== password) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    return res.json({
+      message: 'Login successful',
+      user: {
+        id: client.id,
+        firstName: client.first_name || '',
+        lastName: client.last_name || '',
+        email: client.email,
+        role: client.role || 'user',
+        phone: client.phone || ''
+      }
+    });
+  });
 });
 
 app.post('/api/auth/signup', (req, res) => {
@@ -59,23 +84,27 @@ app.post('/api/auth/signup', (req, res) => {
     return res.status(400).json({ message: 'All fields required' });
   }
 
-  db.query(
-    'INSERT INTO users (firstName, lastName, phone, email, password) VALUES (?, ?, ?, ?, ?)',
-    [firstName, lastName, phone, email, password],
-    (err, result) => {
-      if (err) {
-        if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ message: 'Email already registered' });
-        console.error('DB insert error (signup):', err);
-        return res.status(500).json({ message: 'Database error' });
+  const sql = `
+    INSERT INTO clients (first_name, last_name, phone, email, address, password, role)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `;
+  const params = [firstName, lastName, phone, email, null, password, 'user'];
+
+  db.query(sql, params, (err, result) => {
+    if (err) {
+      if (err.code === 'ER_DUP_ENTRY') {
+        return res.status(400).json({ message: 'Email already registered' });
       }
-      return res.json({ message: 'User registered', id: result.insertId });
+      console.error('DB insert error (signup):', err);
+      return res.status(500).json({ message: 'Database error' });
     }
-  );
+
+    return res.json({ message: 'User registered', id: result.insertId });
+  });
 });
 
-// --- Mount packages router factory (safe require) ---
+// --- Mount packages router ---
 try {
-  // packages router should export a factory: module.exports = (db) => router
   const packagesRouterFactory = require('./routes/packages');
   if (typeof packagesRouterFactory !== 'function') {
     console.error('packages router did not export a function. Check routes/packages.js');
@@ -102,7 +131,7 @@ try {
   console.error('Failed to load bookings router:', err && err.stack ? err.stack : err);
 }
 
-// --- Optional: API 404 handler ---
+// --- API 404 handler ---
 app.use('/api', (req, res) => {
   res.status(404).json({ message: 'API route not found' });
 });
@@ -115,14 +144,43 @@ app.use((err, req, res, next) => {
 
 // --- Start server ---
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);
 });
 
-// --- Graceful shutdown (optional) ---
+// --- Graceful shutdown ---
+function shutdown(reason) {
+  console.log('Shutting down server...', reason || '');
+  server.close(() => {
+    console.log('HTTP server closed.');
+    try {
+      if (db && typeof db.end === 'function') {
+        db.end((err) => {
+          if (err) console.error('Error closing DB pool:', err);
+          else console.log('DB pool closed.');
+          process.exit(0);
+        });
+      } else {
+        process.exit(0);
+      }
+    } catch (e) {
+      console.error('Error during DB pool close:', e);
+      process.exit(1);
+    }
+  });
+
+  setTimeout(() => {
+    console.error('Forcing shutdown.');
+    process.exit(1);
+  }, 10000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled Rejection:', reason);
 });
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
+  shutdown('uncaughtException');
 });
